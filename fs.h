@@ -65,4 +65,17 @@ typedef struct {
     char reserved[46];
 } __attribute__((packed)) fs_header_t;
 
+typedef struct {
+    char name[32];
+
+    uint32_t start;
+    uint64_t size;
+    uint32_t ptr_local; // offset inside the file
+    uint64_t ptr_global; // offset inside the drive
+
+    uint8_t mode : 6;
+    uint8_t open_mode : 3;
+} file_t;
+
 int mknode(FILE *fp, char *pwd, char *name, int type);
+file_t *_fopen(FILE *fp, char *path, uint8_t mode);
