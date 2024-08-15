@@ -81,9 +81,9 @@ void new_fs(FILE *fp, uint64_t size, int isos) {
         fwrite(blk, BLOCK_SIZE, 1, fp);
     }
 
-    mknode(fp, "/", "dev", FS_DIR);
-    mknode(fp, "/dev", "stdout", FS_CHARDEV);
-    mknode(fp, "/dev", "stdin", FS_CHARDEV);
+    mknode(fp, "/dev", FS_DIR);
+    mknode(fp, "/dev/stdout", FS_CHARDEV);
+    mknode(fp, "/dev/stdin", FS_CHARDEV);
 }
 
 /*
@@ -126,9 +126,11 @@ static block_t *get_block_by_index(FILE *fp, uint32_t iblk) {
     return blk;
 }
 
-static uint32_t find_node(FILE *fp, char *path, int type, node_t *dst) {
+static uint32_t find_node(FILE *fp, char *path, int type, int parent, node_t *dst) {
     int nsplits = 0;
     char **pwd_split = split_string(path, "/", &nsplits);
+    if (parent) nsplits--;
+
     block_t *blk = get_block_by_index(fp, 1);
     node_t *node = malloc(sizeof(node_t));
 
@@ -162,6 +164,8 @@ static uint32_t find_node(FILE *fp, char *path, int type, node_t *dst) {
                     free(b);
                     break;
                 }
+
+                free(pwd_split[i]);
             }
 
             children++;
@@ -176,18 +180,29 @@ static uint32_t find_node(FILE *fp, char *path, int type, node_t *dst) {
     memcpy(dst, node, sizeof(node_t));
     free(node);
     free(temp);
+    free(pwd_split);
 
     return block_offset;
 }
 
-int mknode(FILE *fp, char *pwd, char *name, int type) {
+node_t *mknode(FILE *fp, char *path, int type) {
     node_t *node = malloc(sizeof(node_t));
-    uint32_t block_offset = find_node(fp, pwd, FS_DIR, node);
+    uint32_t block_offset = find_node(fp, path, FS_DIR, 1, node);
     if (block_offset == 0) {
         free(node);
-        printf("pwd: %s, name: %s\n", pwd, name);
-        return -1;
+        return NULL;
     }
+
+    int nsplits = 0;
+    char **temp = split_string(path, "/", &nsplits);
+    char *name = malloc(32);
+    strcpy(name, temp[nsplits-1]);
+    printf("name = %s\n", name);
+
+    for (int i = 0; i < nsplits; i++) {
+        free(temp[i]);
+    }
+    free(temp);
 
     block_t *blk = get_block_by_index(fp, block_offset);
     memcpy(node, blk->data, sizeof(node_t));
@@ -225,8 +240,7 @@ int mknode(FILE *fp, char *pwd, char *name, int type) {
     fwrite(blk, BLOCK_SIZE, 1, fp);
 
     free(blk);
-    free(node);
-    return 0;
+    return node;
 }
 
 // if both append and write is selected, write will be executed
@@ -234,16 +248,15 @@ file_t *_fopen(FILE *fp, char *path, uint8_t mode) {
     if (mode == 0) return NULL;
 
     node_t *node = malloc(sizeof(node_t));
-    uint32_t off = find_node(fp, path, FS_FILE, node);
-
-    if (off == 0) {
-        free(node);
-        return NULL;
-    }
-
+    uint32_t off = find_node(fp, path, FS_FILE, 0, node);
     file_t *file = malloc(sizeof(file_t));
 
     if (mode & FMODE_W) {
+        if (off == 0) { // file does not exist
+            free(node); // free old node
+            node = mknode(fp, path, FS_FILE);
+        }
+
         if ((node->mode & MODE_W) == 0) {
             free(node);
             free(file);
@@ -258,6 +271,11 @@ file_t *_fopen(FILE *fp, char *path, uint8_t mode) {
         file->start = node->first_block;
         strcpy(file->name, node->name);
     } else if (mode & FMODE_A) { // append
+        if (off == 0) { // file does not exist
+            free(node);
+            node = mknode(fp, path, FS_FILE);
+        }
+
         if ((node->mode & MODE_W) == 0) {
             free(node);
             free(file);
@@ -266,7 +284,7 @@ file_t *_fopen(FILE *fp, char *path, uint8_t mode) {
 
         // we need to find the last block to set the file pointer
         block_t *block = get_block_by_index(fp, node->first_block);
-        int next;
+        int next = node->first_block;
         while (block->next != 0) {
             next = block->next;
             free(block);
@@ -274,16 +292,21 @@ file_t *_fopen(FILE *fp, char *path, uint8_t mode) {
             block = get_block_by_index(fp, block->next);
         }
 
-        file_t *file = malloc(sizeof(file_t));
         file->mode = node->mode;
         file->open_mode = mode;
         file->ptr_local = node->size;
-        file->ptr_global = next * BLOCK_SIZE + (BLOCK_SIZE - node->size % BLOCK_SIZE);
+        file->ptr_global = next * BLOCK_SIZE + node->size % BLOCK_SIZE;
+        if (next == node->first_block) file->ptr_global += sizeof(node_t);
         file->size = node->size;
         file->start = node->first_block;
         strcpy(file->name, node->name);
     } else if (mode & FMODE_R) {
-        file_t *file = malloc(sizeof(file_t));
+        if (off == 0) {
+            free(node);
+            free(file);
+            return NULL;
+        }
+
         file->mode = node->mode;
         file->open_mode = mode;
         file->ptr_local = 0;
@@ -295,9 +318,4 @@ file_t *_fopen(FILE *fp, char *path, uint8_t mode) {
 
     free(node);
     return file;
-}
-
-int main() {
-    FILE *fp = fopen("image.bin", "r+b");
-    new_fs(fp, 1024 * 1024, 1);
 }
