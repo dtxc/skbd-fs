@@ -12,6 +12,7 @@
 #define FS_MAGIC    "SFS PART"
 
 #define BLOCK_SIZE 4096
+#define BLOCK_DATA_SIZE (BLOCK_SIZE - 4 - 1 - 3)
 
 #define BLOCK_FREE      (1 << 0)
 #define BLOCK_METADATA  (1 << 1) // if set, the block will contain a node and then the data
@@ -68,6 +69,8 @@ typedef struct {
 typedef struct {
     char name[32];
 
+    uint8_t is_locked;
+
     uint32_t start;
     uint64_t size;
     uint32_t ptr_local; // offset inside the file
@@ -77,5 +80,5 @@ typedef struct {
     uint8_t open_mode : 3;
 } file_t;
 
-int mknode(FILE *fp, char *pwd, char *name, int type);
+node_t *mknode(FILE *fp, char *path, int type);
 file_t *_fopen(FILE *fp, char *path, uint8_t mode);
