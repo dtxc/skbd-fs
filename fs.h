@@ -17,9 +17,16 @@
 #define BLOCK_FREE      (1 << 0)
 #define BLOCK_METADATA  (1 << 1) // if set, the block will contain a node and then the data
 
+// file permissions
+// mode = user << 3 | kernel
 #define MODE_X (1 << 0)
 #define MODE_W (1 << 1)
 #define MODE_R (1 << 2)
+
+// fopen modes
+#define FMODE_R (1 << 0)
+#define FMODE_W (1 << 1)
+#define FMODE_A (1 << 2)
 
 #define MAX_PATH 256
 
