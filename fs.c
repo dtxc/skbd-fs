@@ -18,7 +18,7 @@ char **split_string(const char *str, const char *delimiter, int *num_tokens) {
         token = strtok_r(NULL, delimiter, &saveptr);
     }
 
-    result = (char **)malloc(count * sizeof(char*));
+    result = (char **) malloc(count * sizeof(char*));
     
     // extract the tokens
     strcpy(str_copy, str);
@@ -97,6 +97,7 @@ static uint32_t find_next_free_block(FILE *fp, block_t *dest, uint32_t iblk) {
     uint32_t fs_size = 1048576;
 
     block_t *blk = malloc(BLOCK_SIZE);
+    if (blk == NULL) printf("n\n");
     fseek(fp, offset, SEEK_SET);
 
     while (offset < fs_size) {
@@ -104,7 +105,9 @@ static uint32_t find_next_free_block(FILE *fp, block_t *dest, uint32_t iblk) {
         fread(blk, BLOCK_SIZE, 1, fp);
 
         if (blk->attributes & BLOCK_FREE) {
-            memcpy(dest, blk, BLOCK_SIZE);
+            if (dest != NULL) {
+                memcpy(dest, blk, BLOCK_SIZE);
+            }
             free(blk);
             return offset / BLOCK_SIZE;
         }
@@ -164,8 +167,6 @@ static uint32_t find_node(FILE *fp, char *path, int type, int parent, node_t *ds
                     free(b);
                     break;
                 }
-
-                free(pwd_split[i]);
             }
 
             children++;
@@ -177,6 +178,12 @@ static uint32_t find_node(FILE *fp, char *path, int type, int parent, node_t *ds
             return 0;
         }
     }
+
+    if (parent) nsplits++;
+    for (int i = 0; i < nsplits; i++) {
+        free(pwd_split[i]);
+    }
+
     memcpy(dst, node, sizeof(node_t));
     free(node);
     free(temp);
@@ -197,7 +204,6 @@ node_t *mknode(FILE *fp, char *path, int type) {
     char **temp = split_string(path, "/", &nsplits);
     char *name = malloc(32);
     strcpy(name, temp[nsplits-1]);
-    printf("name = %s\n", name);
 
     for (int i = 0; i < nsplits; i++) {
         free(temp[i]);
@@ -263,13 +269,11 @@ file_t *_fopen(FILE *fp, char *path, uint8_t mode) {
             return NULL; // not writeable
         }
 
-        file->mode = node->mode;
-        file->open_mode = mode;
+        file->node = node;
+        file->mode = mode;
+        file->is_locked = 0;
         file->ptr_local = 0;
         file->ptr_global = BLOCK_SIZE * node->first_block;
-        file->size = node->size;
-        file->start = node->first_block;
-        strcpy(file->name, node->name);
     } else if (mode & FMODE_A) { // append
         if (off == 0) { // file does not exist
             free(node);
@@ -292,14 +296,12 @@ file_t *_fopen(FILE *fp, char *path, uint8_t mode) {
             block = get_block_by_index(fp, block->next);
         }
 
-        file->mode = node->mode;
-        file->open_mode = mode;
+        file->node = node;
+        file->mode = mode;
+        file->is_locked = 0;
         file->ptr_local = node->size;
         file->ptr_global = next * BLOCK_SIZE + node->size % BLOCK_SIZE;
         if (next == node->first_block) file->ptr_global += sizeof(node_t);
-        file->size = node->size;
-        file->start = node->first_block;
-        strcpy(file->name, node->name);
     } else if (mode & FMODE_R) {
         if (off == 0) {
             free(node);
@@ -307,15 +309,202 @@ file_t *_fopen(FILE *fp, char *path, uint8_t mode) {
             return NULL;
         }
 
-        file->mode = node->mode;
-        file->open_mode = mode;
+        file->node = node;
+        file->mode = mode;
+        file->is_locked = 0;
         file->ptr_local = 0;
         file->ptr_global = BLOCK_SIZE * node->first_block;
-        file->size = node->size;
-        file->start = node->first_block;
-        strcpy(file->name, node->name);
     }
 
-    free(node);
     return file;
+}
+
+int _fread(FILE *fp, file_t *file, uint32_t size, uint8_t *buffer) {
+    if ((file->mode & FMODE_R) == 0) {
+        return -1;
+    }
+
+    // wait for the file to be unlocked
+    while (file->is_locked != 0);
+
+    file->is_locked = 1;
+
+    // in the first block of the file there's both metadata and data
+    int offset = file->ptr_local + sizeof(node_t);
+
+    int remaining_size = (file->node->size + sizeof(node_t)) - offset;
+    if (remaining_size <= 0) {
+        return -1; // invalid seek/reached EOF
+    } else if (remaining_size < size) {
+        size = remaining_size;
+    }
+
+    // find seek pointer in current block.
+    int nblocks_real = offset / BLOCK_DATA_SIZE; // get number of real blocks.
+    int off_crt_block = offset - nblocks_real * BLOCK_DATA_SIZE;
+
+    block_t *crt_block = get_block_by_index(fp, file->ptr_global / BLOCK_SIZE);
+
+    // read blocks
+    // remaining data = BLOCK_DATA_SIZE - off_crt_block
+    if (size <= BLOCK_DATA_SIZE - off_crt_block) {
+        memcpy(buffer, crt_block->data + off_crt_block, size);
+
+        file->ptr_local += size;
+        file->ptr_global += size;
+        return 0;
+    }
+
+    // size > current block
+    memcpy(buffer, crt_block->data + off_crt_block, BLOCK_DATA_SIZE - off_crt_block);
+    buffer += BLOCK_DATA_SIZE - off_crt_block;
+    size -= BLOCK_DATA_SIZE - off_crt_block;
+
+    int temp = size / BLOCK_DATA_SIZE; // number of whole blocks to read
+    int next = crt_block->next;
+    for (int i = 0; i < temp; i++) {
+        if (crt_block->next == 0) {
+            return -1; // I/O error
+        }
+
+        // find next block
+        free(crt_block);
+        crt_block = get_block_by_index(fp, next);
+        memcpy(buffer, crt_block->data, BLOCK_DATA_SIZE);
+
+
+        next = crt_block->next;
+        buffer += BLOCK_DATA_SIZE;
+        size -= BLOCK_DATA_SIZE;
+        file->ptr_local += BLOCK_DATA_SIZE;
+    }
+
+    // we do not need the entire block.
+    if (size > 0) {
+        if (crt_block->next == 0) {
+            return -1; // I/O error
+        }
+
+        int next = crt_block->next;
+        free(crt_block);
+        crt_block = get_block_by_index(fp, next);
+        memcpy(buffer, crt_block->data, size);
+    }
+
+    file->ptr_global = BLOCK_SIZE * next + size;
+    file->ptr_local += size;
+    file->is_locked = 0;
+
+    free(crt_block);
+    return 0;
+}
+
+int _fwrite(FILE *fp, file_t *file, uint32_t size, uint8_t *buffer) {
+    if ((file->mode & FMODE_W) == 0) { // append mode is not implemented.
+        return -1; // file is readonly
+    }
+
+    if (size == 0) return 0;
+
+    while (file->is_locked != 0);
+    file->is_locked = 1;
+
+    int offset = file->ptr_local + sizeof(node_t);
+    int nblocks_real = offset / BLOCK_DATA_SIZE; // get number of real blocks.
+    int off_crt_block = offset - nblocks_real * BLOCK_DATA_SIZE;
+
+    block_t *crt_block = get_block_by_index(fp, file->ptr_global / BLOCK_SIZE);
+
+    // set new size
+    if (file->ptr_local + size > file->node->size) {
+        file->node->size += file->ptr_local + size - file->node->size;
+    }
+
+    // update node size
+    if (file->ptr_global / BLOCK_SIZE == file->node->first_block) {
+        // current block is the first one
+        memcpy(crt_block->data, file->node, sizeof(node_t));
+    } else {
+        // find first block
+        block_t *first_blk = get_block_by_index(fp, file->node->first_block);
+        memcpy(first_blk->data, file->node, sizeof(node_t));
+
+        fwrite(first_blk, BLOCK_SIZE, 1, fp);
+        free(first_blk);
+    }
+
+    // write single block
+    if (size <= BLOCK_DATA_SIZE - off_crt_block) {
+        memcpy(crt_block->data + off_crt_block, buffer, size);
+
+        fseek(fp, (file->ptr_global / BLOCK_SIZE) * BLOCK_SIZE, SEEK_SET);
+        int i = fwrite(crt_block, BLOCK_SIZE, 1, fp);
+
+        file->ptr_global += size;
+        file->ptr_local += size;
+        
+        free(crt_block);
+
+        file->is_locked = 0;
+        return 0;
+    }
+
+    // first block
+    memcpy(crt_block->data + off_crt_block, buffer, BLOCK_DATA_SIZE - off_crt_block);
+
+    // for efficiency reasons, all the blocks that belong to a file will be placed after the previous file block.
+    uint32_t next_idx = find_next_free_block(fp, NULL, file->ptr_global / BLOCK_SIZE);
+    crt_block->next = next_idx;
+
+    fseek(fp, (file->ptr_global / BLOCK_SIZE) * BLOCK_SIZE, SEEK_SET);
+    fwrite((uint8_t *) crt_block, BLOCK_SIZE, 1, fp);
+
+    fseek(fp, next_idx * BLOCK_SIZE + 4, SEEK_SET);
+    char buff[1];
+    buff[0] = 0;
+    fwrite(buff, 1, 1, fp); // set block as not free, so its not detected by find_next_free_block
+
+    free(crt_block);
+
+    buffer += BLOCK_DATA_SIZE - off_crt_block;
+    size -= BLOCK_DATA_SIZE - off_crt_block;
+
+    int c = 0;
+    int temp = size / BLOCK_DATA_SIZE;
+    for (int i = 0; i < temp; i++) {
+        crt_block = get_block_by_index(fp, next_idx);
+
+        c = next_idx; // save current index to calculate offset later.
+        next_idx = find_next_free_block(fp, NULL, next_idx);
+
+        crt_block->attributes = 0; // remove BLOCK_FREE flag.
+        crt_block->next = (size > 0) ? next_idx : 0;
+        memcpy(crt_block->data, buffer, BLOCK_DATA_SIZE);
+
+        fseek(fp, c * BLOCK_SIZE, SEEK_SET);
+        fwrite(crt_block, BLOCK_SIZE, 1, fp);
+
+        fseek(fp, next_idx * BLOCK_SIZE + 4, SEEK_SET);
+        fwrite(buff, 1, 1, fp); // mark next block as not free.
+
+        buffer += BLOCK_DATA_SIZE;
+        size -= BLOCK_DATA_SIZE;
+
+        free(crt_block);
+    }
+
+    // write last block
+    if (size > 0) {
+        crt_block = get_block_by_index(fp, next_idx);
+
+        crt_block->attributes = 0;
+        crt_block->next = 0;
+        memcpy(crt_block->data, buffer, size);
+
+        fseek(fp, next_idx * BLOCK_SIZE, SEEK_SET);
+        fwrite(crt_block, BLOCK_SIZE, 1, fp);
+    }
+
+    file->is_locked = 0;
+    return 0;
 }
