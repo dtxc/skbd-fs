@@ -9,7 +9,7 @@
 #define FS_CHARDEV  (1 << 2)
 
 #define NODE_MAGIC  0x7F9C41
-#define FS_MAGIC    "SFS PART"
+#define FS_MAGIC    "SKBDFS PART "
 
 #define BLOCK_SIZE 4096
 #define BLOCK_DATA_SIZE (BLOCK_SIZE - 4 - 1 - 3)
@@ -28,7 +28,9 @@
 #define FMODE_W (1 << 1)
 #define FMODE_A (1 << 2)
 
-#define MAX_PATH 256
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
 
 typedef struct {
     uint32_t magic;
@@ -36,7 +38,7 @@ typedef struct {
     uint8_t flags;
     uint64_t size; // for FS_DIR: size = n of children
     uint32_t first_block;
-    unsigned mode : 3;
+    uint8_t mode : 6;
 
     char name[32];
 
@@ -62,30 +64,28 @@ typedef struct {
     */
     char padding[3];
 
-    char data[BLOCK_SIZE - 4 - 1 - 3]; // 1 block is exactly 4 kib, including the metadata.
+    char data[BLOCK_DATA_SIZE]; // 1 block is exactly 4 kib, including the metadata.
 } __attribute__((packed)) block_t;
 
 typedef struct {
-    char magic[8];
+    char magic[12];
     uint64_t size;
     uint16_t block_size;
 
-    char reserved[46];
+    char reserved[42];
 } __attribute__((packed)) fs_header_t;
 
 typedef struct {
-    char name[32];
+    node_t *node;
 
     uint8_t is_locked;
 
-    uint32_t start;
-    uint64_t size;
     uint32_t ptr_local; // offset inside the file
     uint64_t ptr_global; // offset inside the drive
-
-    uint8_t mode : 6;
-    uint8_t open_mode : 3;
+    uint8_t mode : 3;
 } file_t;
 
 node_t *mknode(FILE *fp, char *path, int type);
 file_t *_fopen(FILE *fp, char *path, uint8_t mode);
+int _fread(FILE *fp, file_t *file, uint32_t size, uint8_t *buffer);
+int _fwrite(FILE *fp, file_t *file, uint32_t size, uint8_t *buffer)
