@@ -88,4 +88,4 @@ typedef struct {
 node_t *mknode(FILE *fp, char *path, int type);
 file_t *_fopen(FILE *fp, char *path, uint8_t mode);
 int _fread(FILE *fp, file_t *file, uint32_t size, uint8_t *buffer);
-int _fwrite(FILE *fp, file_t *file, uint32_t size, uint8_t *buffer)
+int _fwrite(FILE *fp, file_t *file, uint32_t size, uint8_t *buffer);
